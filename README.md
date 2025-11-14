@@ -184,6 +184,7 @@ Based on the paper (Table 1), HOPE achieves:
 - **Authors**: Ali Behrouz, Meisam Razaviyayn, Peiling Zhong, Vahab Mirrokni (Google Research)
 - **Conference**: NeurIPS 2025
 - **arXiv**: Coming November 13, 2024
+- **Local Copy**: See [`paper.pdf`](paper.pdf) in this repository
 
 ## License
 
