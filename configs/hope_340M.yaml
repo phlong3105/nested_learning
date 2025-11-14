@@ -1,0 +1,36 @@
+# HOPE 340M configuration
+
+model:
+  name: hope
+  dim: 512
+  n_layers: 12
+  n_heads: 8
+  vocab_size: 50257
+  chunk_sizes: [16, 64, 256]
+  max_seq_len: 2048
+  dropout: 0.1
+
+optimizer:
+  name: deep_momentum
+  lr: 1e-3
+  momentum: 0.9
+  weight_decay: 0.01
+  memory_depth: 2
+
+training:
+  batch_size: 8
+  epochs: 10
+  max_grad_norm: 1.0
+  eval_interval: 1000
+  save_interval: 5000
+
+data:
+  dataset: wikitext
+  dataset_config: wikitext-103-raw-v1
+  max_length: 1024
+  num_workers: 4
+
+system:
+  device: cuda
+  seed: 42
+  mixed_precision: true
