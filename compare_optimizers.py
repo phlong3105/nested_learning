@@ -99,7 +99,7 @@ def plot_2d_optimization():
     optimizers = {
         "DMGD": lambda params: DeepMomentumGD(
             params, lr=0.01, momentum=0.9,
-            memory_depth=2, memory_hidden=32
+            memory_depth=2, memory_hidden_dim=32
         ),
         "SGD+Momentum": lambda params: torch.optim.SGD(
             params, lr=0.01, momentum=0.9
@@ -256,7 +256,7 @@ def plot_neural_network_training():
     optimizers = {
         "DMGD": lambda params: DeepMomentumGD(
             params, lr=0.01, momentum=0.9,
-            memory_depth=2, memory_hidden=32
+            memory_depth=2, memory_hidden_dim=32
         ),
         "SGD+Momentum": lambda params: torch.optim.SGD(
             params, lr=0.01, momentum=0.9
