@@ -9,6 +9,15 @@ Based on Section 2.3 of the paper, Equation 23:
     m_{i+1} = epsilon_{i+1} * m_i - eta_t * grad_L^(2)(m_i; u_i, I)
 
 where u_i = grad_L(W_i; x_i) and m(·) is an MLP instead of linear matrix.
+
+IMPORTANT LIMITATIONS:
+- TODO: Memory MLPs are randomly initialized and NEVER TRAINED (no internal loss L^(2))
+- TODO: Only feeds gradient, not [gradient, momentum] context as paper suggests
+- TODO: Per-parameter MLPs create scalability issues for large models
+- TODO: Needs meta-learning infrastructure to actually learn optimization
+
+Current implementation is a STATIC NONLINEAR MOMENTUM, not the learned optimizer
+described in the paper. This demonstrates the API design but not the full concept.
 """
 
 import torch

@@ -251,6 +251,12 @@ class SelfModifyingAttention(nn.Module):
 
     Based on the gradient descent variant in Section 2.3 (Equations 28-29):
         W_{t+1} = W_t * (I - x_t * x_t^T) - lr * grad_L
+
+    IMPORTANT LIMITATION / MISNOMER:
+    - TODO: Does NOT actually modify parameters (W_q, W_k, W_v, W_o are static)
+    - Actually implements LINEAR ATTENTION with fast weights (external memory M)
+    - Should be renamed to "LinearAttentionWithMemory" or "FastWeightsAttention"
+    - To fix: Need online parameter updates during forward pass, not just memory buffer
     """
 
     def __init__(

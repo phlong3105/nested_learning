@@ -8,6 +8,12 @@ information at different timescales.
 Based on Section 3, Equations 30-31:
     y_t = MLP^(f_k)(...MLP^(f_1)(x_t))
     θ^(f_ℓ)_{i+1} = θ^(f_ℓ)_i - sum(...) if i ≡ 0 (mod C^(ℓ))
+
+IMPORTANT LIMITATION:
+- TODO: Multi-frequency update methods (get_update_levels, accumulate_gradients,
+  apply_accumulated_gradients) are NEVER CALLED by training loops
+- Currently used as a plain sequential MLP stack, NOT as multi-timescale memory
+- To enable: Training loop must check update_levels and accumulate/apply grads per level
 """
 
 import torch

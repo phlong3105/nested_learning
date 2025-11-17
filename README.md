@@ -1,8 +1,10 @@
 # Nested Learning: The Illusion of Deep Learning Architectures
 
-**Complete PyTorch implementation of the NeurIPS 2025 paper by Behrouz et al. (Google Research)**
+**Partial PyTorch implementation of the NeurIPS 2025 paper by Behrouz et al. (Google Research)**
 
-> **Portfolio Project**: This implementation demonstrates deep understanding of modern optimization theory and ability to transform cutting-edge research papers into production-quality code. Created as part of a Research Engineer portfolio showcasing both theoretical depth and systems engineering capability.
+> **Portfolio Project**: This implementation demonstrates paper reading, code structuring, and PyTorch engineering skills by implementing selected components from the "Nested Learning" framework. Created as part of a Research Engineer portfolio. **See IMPLEMENTATION_STATUS.md for honest assessment of what's implemented vs. what's missing.**
+
+⚠️ **Status**: This is a **learning implementation** with significant gaps from the full paper. Core concepts like nested optimization and self-modifying parameters are not fully implemented. See limitations below.
 
 ## Overview
 
@@ -46,6 +48,49 @@ nested-learning/
 ├── tests/                   # Unit tests
 └── docs/                    # Documentation
 ```
+
+## Implementation Status & Limitations
+
+**📋 For detailed analysis, see [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)**
+
+### ✅ What's Implemented and Working
+
+- **Basic Optimizers**: PyTorch-compatible optimizer API (DeepMomentumGD, DeltaRuleMomentum, PreconditionedMomentum)
+- **Memory Systems**: AssociativeMemory and LinearAttention modules
+- **HOPE Model**: Transformer-like architecture with custom attention
+- **Package Structure**: Clean, documented, installable Python package
+
+### ⚠️ What's Incomplete or Simplified
+
+- **Nested Optimization**: Memory modules are static (not trained via internal loss functions)
+- **DeepMomentumGD**: Uses random MLPs instead of learned optimization; doesn't scale to large models
+- **SelfModifyingAttention**: Implements linear attention, not true self-modifying parameters
+- **ContinuumMemorySystem**: Multi-frequency update code exists but is never called in training
+- **Delta-Rule Preconditioner**: Initialized but never updated (non-functional)
+
+### ❌ What's Not Implemented
+
+- **SelfModifyingTitan**: Placeholder only (raises `NotImplementedError`)
+- **Nested Learning Framework**: No second-level gradient descent or internal losses
+- **Experimental Reproduction**: No scripts reproducing paper's main results (perplexity, benchmarks)
+- **True Self-Modification**: Models don't update their own parameters online
+
+### Key Insight
+
+This implementation reveals a common gap in ML research: **theory vs. practice**. The paper's nested optimization framework requires:
+- Meta-learning infrastructure for training optimizer networks
+- Careful initialization and stability techniques
+- Computational overhead management
+
+These challenges aren't fully addressed in the theoretical paper, and this implementation demonstrates the engineering work needed to bridge that gap.
+
+### Portfolio Value
+
+This project demonstrates:
+- ✅ Ability to read and understand complex ML papers
+- ✅ PyTorch engineering and package design
+- ✅ Honest technical assessment (more valuable than overclaiming)
+- ✅ Understanding of theory-practice gaps in research
 
 ## Installation
 
