@@ -292,7 +292,8 @@ class NestedDeepMomentumGD(Optimizer):
         # that move parameters in the direction that reduces meta_loss
         # L_surrogate = sum_i (memory_output_i * grad_meta_i)
         # Minimizing this encourages memory to produce updates aligned with -grad_meta
-        surrogate_loss = torch.tensor(0.0)
+        # Use meta_loss to get correct device/dtype
+        surrogate_loss = meta_loss.new_zeros(())
         for i, (memory_out, grad) in enumerate(zip(self._last_memory_outputs, param_grads)):
             if grad is not None and memory_out.grad_fn is not None:
                 # Reshape grad to match memory output
@@ -309,11 +310,20 @@ class NestedDeepMomentumGD(Optimizer):
         """
         Perform meta-learning step to improve memory modules.
 
-        This implements the inner optimization loop L̃^(2).
+        This implements the inner optimization loop L̃^(2) from the paper.
+
+        The key challenge: standard backprop through meta_loss won't reach
+        memory modules because parameter updates happen in no_grad().
+
+        Solution: We use compute_meta_gradients() to create a surrogate loss
+        that connects the meta_loss signal to memory module outputs.
 
         Args:
             meta_loss: Loss that depends on how well the optimizer performs
                       (e.g., validation loss after several optimization steps)
+
+        Note: For this to work, you must call optimizer.step(create_graph=True)
+        during the inner optimization loop to preserve the computation graph.
         """
         if not self.meta_learning:
             return
@@ -321,9 +331,25 @@ class NestedDeepMomentumGD(Optimizer):
         if self.memory_optimizer is None:
             raise ValueError("Meta-learning enabled but no memory optimizer provided")
 
-        # Backprop through memory modules
+        # Zero gradients first
         self.memory_optimizer.zero_grad()
-        meta_loss.backward()
+
+        # Check if we have stored memory outputs from create_graph=True steps
+        if hasattr(self, '_last_memory_outputs') and self._last_memory_outputs:
+            # Use surrogate loss approach to connect meta_loss to memory modules
+            self.compute_meta_gradients(meta_loss)
+        else:
+            # Fallback: try direct backprop (may not work if graph not retained)
+            try:
+                meta_loss.backward(retain_graph=True)
+            except RuntimeError:
+                # Graph was not retained, memory modules won't be updated
+                import warnings
+                warnings.warn(
+                    "meta_step called but computation graph not available. "
+                    "Make sure to call step(create_graph=True) during inner loop."
+                )
+                return
 
         # Clip gradients for stability
         for memory in self.memory_modules.values():
@@ -331,6 +357,10 @@ class NestedDeepMomentumGD(Optimizer):
 
         # Update memory module parameters
         self.memory_optimizer.step()
+
+        # Clear stored outputs
+        if hasattr(self, '_last_memory_outputs'):
+            self._last_memory_outputs = []
 
     def state_dict(self):
         """

@@ -137,6 +137,9 @@ class LinearAttention(nn.Module):
         y_t = M_t * q_t
 
     This is the "unnormalized" linear attention formulation.
+
+    IMPORTANT: Memory is per-sequence, not shared across batch.
+    Each sequence in the batch maintains its own memory state.
     """
 
     def __init__(
@@ -160,36 +163,62 @@ class LinearAttention(nn.Module):
         # Output projection
         self.W_o = nn.Linear(self.dim_value, dim, bias=False)
 
-        # Memory state (fast weights)
-        self.register_buffer(
-            'memory',
-            torch.zeros(self.dim_value, self.dim_key)
-        )
+        # Persistent memory for stateful processing (optional, for RNN-like use)
+        # Set to None by default; use set_persistent_memory() to enable
+        self._persistent_memory = None
 
     def reset_memory(self):
-        """Reset the memory state."""
-        self.memory.zero_()
+        """Reset the persistent memory state (if enabled)."""
+        if self._persistent_memory is not None:
+            self._persistent_memory.zero_()
 
-    def forward(self, x, reset_memory=False):
+    def set_persistent_memory(self, batch_size: int, device=None, dtype=None):
+        """
+        Enable persistent memory for RNN-like stateful processing.
+
+        Args:
+            batch_size: Number of sequences to track
+            device: Device for memory tensor
+            dtype: Data type for memory tensor
+        """
+        self._persistent_memory = torch.zeros(
+            batch_size, self.dim_value, self.dim_key,
+            device=device, dtype=dtype
+        )
+
+    def forward(self, x, reset_memory=False, return_memory=False):
         """
         Forward pass of linear attention.
 
         Args:
             x: Input tensor of shape (batch, seq_len, dim)
-            reset_memory: Whether to reset memory before processing
+            reset_memory: Whether to reset persistent memory before processing
+            return_memory: Whether to return final memory state
 
         Returns:
             Output tensor of shape (batch, seq_len, dim)
+            If return_memory=True: (output, memory) where memory is (batch, dim_value, dim_key)
         """
         if reset_memory:
             self.reset_memory()
 
         batch_size, seq_len, _ = x.shape
+        device, dtype = x.device, x.dtype
 
         # Project to keys, values, queries
         queries = self.W_q(x)  # (batch, seq_len, dim_key)
         keys = self.W_k(x)     # (batch, seq_len, dim_key)
         values = self.W_v(x)   # (batch, seq_len, dim_value)
+
+        # Initialize per-sequence memory
+        # Use persistent memory if available, otherwise start fresh
+        if self._persistent_memory is not None and self._persistent_memory.shape[0] == batch_size:
+            memory = self._persistent_memory.clone()
+        else:
+            memory = torch.zeros(
+                batch_size, self.dim_value, self.dim_key,
+                device=device, dtype=dtype
+            )
 
         outputs = []
 
@@ -200,20 +229,28 @@ class LinearAttention(nn.Module):
             q_t = queries[:, t]   # (batch, dim_key)
 
             # Update memory: M_t = M_{t-1} + v_t * k_t^T
-            # For batched version, average across batch
-            memory_update = torch.einsum('bd,bk->dk', v_t, k_t) / batch_size
-            self.memory += memory_update
+            # Per-sequence update (NOT batch-averaged!)
+            # memory: (batch, dim_value, dim_key)
+            # v_t: (batch, dim_value), k_t: (batch, dim_key)
+            memory_update = torch.einsum('bv,bk->bvk', v_t, k_t)
+            memory = memory + memory_update
 
             # Retrieve: y_t = M_t * q_t
-            y_t = torch.einsum('dk,bk->bd', self.memory, q_t)
+            # memory: (batch, dim_value, dim_key), q_t: (batch, dim_key)
+            y_t = torch.einsum('bvk,bk->bv', memory, q_t)
 
             if self.normalize:
                 # Normalized version (like softmax attention)
-                # Normalization factor: sum of keys
-                norm = torch.einsum('dk,bk->b', self.memory, q_t)
-                y_t = y_t / (norm.unsqueeze(-1) + 1e-6)
+                # Compute normalization factor per sequence
+                # Sum over value dimension of memory @ query
+                norm = torch.einsum('bvk,bk->b', memory.abs(), q_t.abs()) + 1e-6
+                y_t = y_t / norm.unsqueeze(-1)
 
             outputs.append(y_t)
+
+        # Update persistent memory if enabled
+        if self._persistent_memory is not None:
+            self._persistent_memory = memory.detach()
 
         # Stack outputs
         output = torch.stack(outputs, dim=1)  # (batch, seq_len, dim_value)
@@ -221,6 +258,8 @@ class LinearAttention(nn.Module):
         # Project to output dimension
         output = self.W_o(output)
 
+        if return_memory:
+            return output, memory
         return output
 
 
