@@ -283,8 +283,8 @@ If you use this implementation, please cite the original paper:
 ## Documentation
 
 - [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) - Detailed component documentation
-- [VALIDATION_RESULTS.md](VALIDATION_RESULTS.md) - Test results
 - [CONTRIBUTING.md](CONTRIBUTING.md) - Contribution guidelines
+- [docs/CONCEPTS.md](docs/CONCEPTS.md) - Paper concepts explained
 
 ## License
 
