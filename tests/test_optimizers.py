@@ -198,5 +198,87 @@ def test_deep_momentum_memory_gradients():
     assert any_changed, "Memory weights should change after a single step (internal loss training)"
 
 
+def test_deep_momentum_l2_regression_mode():
+    """
+    Test DeepMomentumGD with paper-exact L2 regression internal loss.
+
+    This verifies:
+    1. L2 regression mode runs without error
+    2. Memory weights are updated
+    3. L2 projection matrices are created and updated
+    """
+    torch.manual_seed(42)
+
+    model = nn.Linear(64, 32)
+    optimizer = DeepMomentumGD(
+        model.parameters(),
+        lr=0.01,
+        memory_lr=0.01,
+        use_shared_memory=True,
+        internal_loss_mode='l2_regression',  # Paper-exact mode
+        l2_projection_lr=0.1,
+    )
+
+    # Verify mode is set correctly
+    stats = optimizer.get_internal_loss_stats()
+    assert stats['internal_loss_mode'] == 'l2_regression'
+
+    # Get initial memory weights
+    initial_memory_weights = {}
+    for name, param in optimizer.shared_memory.named_parameters():
+        initial_memory_weights[name] = param.data.clone()
+
+    # Run several training steps
+    for step in range(10):
+        x = torch.randn(32, 64)
+        y = torch.randn(32, 32)
+
+        output = model(x)
+        loss = nn.functional.mse_loss(output, y)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    # Check that memory weights changed
+    weights_changed = False
+    for name, param in optimizer.shared_memory.named_parameters():
+        if not torch.allclose(initial_memory_weights[name], param.data, atol=1e-6):
+            weights_changed = True
+            break
+
+    assert weights_changed, "Memory module weights should change during L2 regression training"
+
+    # Check that L2 projection matrices were created
+    stats = optimizer.get_internal_loss_stats()
+    assert stats['num_l2_projections'] > 0, "L2 projection matrices should be created"
+
+
+def test_deep_momentum_convergence_l2_mode():
+    """Test that L2 regression mode can minimize a simple function."""
+    target = torch.randn(5)
+    param = nn.Parameter(torch.zeros(5))
+
+    optimizer = DeepMomentumGD(
+        [param],
+        lr=0.3,
+        memory_depth=1,
+        internal_loss_mode='l2_regression',
+    )
+
+    initial_loss = float(((param.detach() - target) ** 2).sum())
+
+    for _ in range(200):
+        loss = ((param - target) ** 2).sum()
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    final_loss = float(((param.detach() - target) ** 2).sum())
+
+    # Loss should decrease significantly
+    assert final_loss < initial_loss * 0.5, f"L2 mode: Loss did not decrease enough: {initial_loss} -> {final_loss}"
+
+
 if __name__ == '__main__':
     pytest.main([__file__])

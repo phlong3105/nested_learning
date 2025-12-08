@@ -21,7 +21,9 @@ Where:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict
+from contextlib import contextmanager
+import copy
 import math
 
 from ..memory import ContinuumMemorySystem, LinearAttention
@@ -254,6 +256,80 @@ class HOPE(nn.Module):
         for block in self.blocks:
             block.apply_pending_updates()
 
+    def clear_pending_updates(self):
+        """Clear all pending updates without applying them."""
+        for block in self.blocks:
+            block.clear_pending_updates()
+
+    def get_self_mod_state(self) -> Dict[str, torch.Tensor]:
+        """
+        Snapshot the current state of all self-modifying layers.
+
+        Returns a dict of weight tensors keyed by their path.
+        Used by adaptation_scope() for save/restore.
+        """
+        state = {}
+        for name, module in self.named_modules():
+            if isinstance(module, SelfModifyingLinear):
+                state[f"{name}.weight"] = module.weight.data.clone()
+                if module.bias is not None:
+                    state[f"{name}.bias"] = module.bias.data.clone()
+        return state
+
+    def set_self_mod_state(self, state: Dict[str, torch.Tensor]):
+        """
+        Restore self-modifying layers to a previous state.
+
+        Args:
+            state: Dict from get_self_mod_state()
+        """
+        for name, module in self.named_modules():
+            if isinstance(module, SelfModifyingLinear):
+                weight_key = f"{name}.weight"
+                if weight_key in state:
+                    module.weight.data.copy_(state[weight_key])
+                bias_key = f"{name}.bias"
+                if bias_key in state and module.bias is not None:
+                    module.bias.data.copy_(state[bias_key])
+
+    @contextmanager
+    def adaptation_scope(self, enable_self_modification: bool = True):
+        """
+        Context manager for temporary online adaptation.
+
+        Within this scope, self-modification is enabled and weights may change.
+        When the scope exits, weights are restored to their original values.
+
+        This is useful for:
+        - Safe inference-time adaptation that doesn't permanently modify the model
+        - Experimenting with different prompts without accumulating weight drift
+        - Testing adaptation behavior without affecting subsequent inferences
+
+        Example:
+            # Weights adapt within scope, then revert
+            with hope.adaptation_scope():
+                output = hope.generate(prompt, max_new_tokens=100)
+            # Model weights are now restored to pre-scope values
+
+        Args:
+            enable_self_modification: Whether to enable self-mod within scope.
+                                     Default True (otherwise why use this scope?)
+        """
+        # Save current state
+        saved_state = self.get_self_mod_state()
+
+        # Clear any pending updates from before the scope
+        self.clear_pending_updates()
+
+        try:
+            yield
+        finally:
+            # Clear any pending updates accumulated during scope
+            self.clear_pending_updates()
+
+            # Restore original weights
+            self.set_self_mod_state(saved_state)
+
 
 class HOPEBlock(nn.Module):
     """
@@ -374,6 +450,14 @@ class HOPEBlock(nn.Module):
         """Apply pending self-modification updates."""
         if self.use_self_modification and hasattr(self.attention, 'apply_pending_updates'):
             self.attention.apply_pending_updates()
+
+    def clear_pending_updates(self):
+        """Clear pending updates without applying them."""
+        if self.use_self_modification and hasattr(self.attention, 'W_q'):
+            self.attention.W_q.clear_pending_updates()
+            self.attention.W_k.clear_pending_updates()
+            self.attention.W_v.clear_pending_updates()
+            self.attention.W_o.clear_pending_updates()
 
 
 class LinearAttentionWithMemory(nn.Module):

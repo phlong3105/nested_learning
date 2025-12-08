@@ -2,7 +2,12 @@
 
 ## Version 0.3.1 - December 2025
 
-**Mathematically verified implementation** of the NeurIPS 2025 paper "Nested Learning" by Behrouz et al. (Google Research).
+Implementation of the NeurIPS 2025 paper "Nested Learning" by Behrouz et al. (Google Research).
+
+**Mathematical verification status:**
+- ✅ **Paper-exact**: Delta rule, L2RegressionAttention, LinearAttention, CMS update scheduling
+- ✅ **Paper-exact (optional)**: DMGD with `internal_loss_mode='l2_regression'` (Eq 21-23)
+- Default: DMGD uses practical surrogate loss (stable, conceptually aligned)
 
 This version includes paper-exact modes, mathematical correctness tests, and inference-time adaptation.
 
@@ -56,6 +61,10 @@ python examples/nested_learning_demo.py
 ### Run Benchmarks
 
 ```bash
+# Synthetic benchmarks (fast, no data download)
+python experiments/benchmark_pattern_learning.py      # DMGD vs SGD
+python experiments/benchmark_continual_learning.py    # HOPE vs Vanilla
+
 # WikiText-103 benchmark (Paper Table 1)
 python experiments/benchmark_wikitext.py --test
 
@@ -147,10 +156,25 @@ logits = model(input_ids, enable_self_modification=True)
 model.apply_pending_updates()
 ```
 
+### Safe Online Adaptation with adaptation_scope
+
+```python
+# adaptation_scope allows temporary self-modification that reverts on exit
+# Useful for inference-time adaptation without permanent weight drift
+
+with model.adaptation_scope():
+    # Self-modification is active within this scope
+    output = model.generate(prompt, max_new_tokens=100)
+    # Weights adapt to the prompt context
+
+# Weights are automatically restored to pre-scope values
+# Safe to reuse model for unrelated prompts
+```
+
 ### Paper-Exact Mode (for Reproduction)
 
 ```python
-from nested_learning.models.titans import SelfModifyingLinear
+from nested_learning.models.titans import SelfModifyingLinear, L2RegressionAttention
 from nested_learning.memory import ContinuumMemorySystem
 
 # Paper-exact self-modification (Eq 28-29)
@@ -159,7 +183,21 @@ layer = SelfModifyingLinear(512, 512, normalized=False)
 # Paper-exact CMS nesting (Eq 30)
 cms = ContinuumMemorySystem(dim=512, num_levels=3)
 output = cms(x, use_residual=False)  # True nesting: MLP_k(MLP_{k-1}(...))
+
+# Paper-exact L2 regression attention (Eq 27-29)
+attn = L2RegressionAttention(dim=512, num_heads=8, normalized=False)
 ```
+
+**Paper-exactness quick reference:**
+
+| Component | Paper-Exact | Stable Default |
+|-----------|-------------|----------------|
+| SelfModifyingLinear | `normalized=False` | `normalized=True` |
+| CMS | `use_residual=False` | `use_residual=True` |
+| L2RegressionAttention | `normalized=False` | `normalized=True` |
+| DMGD internal loss | `internal_loss_mode='l2_regression'` | `'surrogate'` |
+
+See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for detailed configuration guide.
 
 ### Mixed Precision Training (v0.3.0)
 
@@ -197,11 +235,15 @@ trainer.train(num_epochs=10)
 
 ### Nested Optimization (L^(2) Internal Loss)
 
-The core innovation: memory modules learn to compress gradients through a self-supervised internal loss:
+The core innovation: memory modules learn to compress gradients through a self-supervised internal loss.
+
+**Note**: The current DMGD internal loss is a **practical surrogate** (not the literal L² regression on K-V matrices from the paper). It uses:
 
 1. **Reconstruction Loss**: Memory output should capture gradient direction (cosine similarity)
 2. **Magnitude Preservation**: Output magnitude proportional to input gradient
 3. **Temporal Smoothness**: Smooth changes over consecutive steps
+
+This is *conceptually aligned* with the paper's internal objective but not mathematically identical. For paper-exact L² regression, see `L2RegressionAttention`.
 
 ### Multi-Frequency Updates (CMS)
 

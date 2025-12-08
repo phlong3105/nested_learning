@@ -323,9 +323,17 @@ class DeepMomentumGD(Optimizer):
     - Memory modules are trained via an internal loss (gradient reconstruction)
     - The internal loss creates a self-supervised signal for learning
 
-    The internal loss L^(2) has two components:
-    1. Reconstruction: Can the memory reconstruct the input gradient?
-    2. Prediction: Can the memory predict future gradient directions?
+    Two internal loss modes are available:
+
+    **Surrogate mode (default, `internal_loss_mode='surrogate'`):**
+    Practical loss combining cosine similarity + magnitude preservation + temporal smoothness.
+    This is conceptually aligned with the paper but not mathematically identical.
+
+    **L2 regression mode (`internal_loss_mode='l2_regression'`):**
+    Paper-exact L² regression loss (Equations 21-23):
+        L^(2) = ||memory(k) - P @ k||^2
+    where k is the gradient (key) and P is a learned projection matrix.
+    The memory learns to approximate and improve upon a linear transformation.
 
     Args:
         params: Model parameters to optimize
@@ -341,6 +349,8 @@ class DeepMomentumGD(Optimizer):
         gradient_checkpointing: Use gradient checkpointing for memory efficiency
         use_factorized_memory: Use factorized memory modules for large tensors
         factorized_rank: Rank for factorized memory (if enabled)
+        internal_loss_mode: 'surrogate' (default) or 'l2_regression' (paper-exact)
+        l2_projection_lr: Learning rate for L2 projection matrix updates
     """
 
     def __init__(
@@ -358,11 +368,15 @@ class DeepMomentumGD(Optimizer):
         gradient_checkpointing: bool = False,
         use_factorized_memory: bool = False,
         factorized_rank: int = 16,
+        internal_loss_mode: str = 'surrogate',
+        l2_projection_lr: float = 0.01,
     ):
         if lr < 0.0:
             raise ValueError(f"Invalid learning rate: {lr}")
         if momentum < 0.0 or momentum >= 1.0:
             raise ValueError(f"Invalid momentum: {momentum}")
+        if internal_loss_mode not in ('surrogate', 'l2_regression'):
+            raise ValueError(f"internal_loss_mode must be 'surrogate' or 'l2_regression', got {internal_loss_mode}")
 
         defaults = dict(
             lr=lr,
@@ -378,10 +392,17 @@ class DeepMomentumGD(Optimizer):
         self.use_shared_memory = use_shared_memory
         self.step_count = 0
         self.gradient_checkpointing = gradient_checkpointing
+        self.internal_loss_mode = internal_loss_mode
+        self.l2_projection_lr = l2_projection_lr
 
-        # Gradient history for internal loss computation
-        self._grad_history: Dict[int, List[torch.Tensor]] = {}
-        self._history_size = 3  # Keep last N gradients
+        # Memory output history for temporal smoothness in internal loss (surrogate mode)
+        # Note: We store memory outputs, not raw gradients, to enforce smooth evolution
+        self._output_history: Dict[int, List[torch.Tensor]] = {}
+        self._history_size = 3  # Keep last N memory outputs
+
+        # L2 projection matrices for paper-exact mode (per bucket size)
+        # These implement the P matrix in L^(2) = ||memory(k) - P @ k||^2
+        self._l2_projections: Dict[int, torch.Tensor] = {}
 
         # Initialize memory system
         if use_shared_memory:
@@ -434,19 +455,43 @@ class DeepMomentumGD(Optimizer):
         grad: torch.Tensor,
         momentum: torch.Tensor,
         param_id: int,
+        bucket_size: int,
     ) -> torch.Tensor:
         """
         Compute internal loss L^(2) for memory module training.
 
-        The internal loss has two components:
-        1. Reconstruction: The memory should be able to reconstruct
-           a compressed version of the gradient
-        2. Temporal consistency: The output should be smooth over time
+        Dispatches to either surrogate or L2 regression mode based on config.
 
         Args:
             memory_output: Output from memory module
             grad: Current gradient
             momentum: Previous momentum
+            param_id: Parameter identifier
+            bucket_size: Size of the bucket (for L2 projection lookup)
+
+        Returns:
+            Internal loss value
+        """
+        if self.internal_loss_mode == 'l2_regression':
+            return self._compute_l2_regression_loss(memory_output, grad, bucket_size)
+        else:
+            return self._compute_surrogate_loss(memory_output, grad, param_id)
+
+    def _compute_surrogate_loss(
+        self,
+        memory_output: torch.Tensor,
+        grad: torch.Tensor,
+        param_id: int,
+    ) -> torch.Tensor:
+        """
+        Compute surrogate internal loss (default mode).
+
+        Combines cosine similarity, magnitude preservation, and temporal smoothness.
+        This is conceptually aligned with the paper but not mathematically identical.
+
+        Args:
+            memory_output: Output from memory module
+            grad: Current gradient
             param_id: Parameter identifier
 
         Returns:
@@ -475,28 +520,100 @@ class DeepMomentumGD(Optimizer):
             magnitude_loss = output_magnitude.pow(2)
 
         # Component 3: Temporal smoothness (if we have history)
+        # We compare current memory output to previous memory output (not raw gradient)
+        # This encourages the learned memory transformation to evolve smoothly
         temporal_loss = torch.tensor(0.0, device=grad.device)
-        if param_id in self._grad_history and len(self._grad_history[param_id]) > 0:
-            prev_grad = self._grad_history[param_id][-1]
-            if prev_grad.shape == memory_output.shape:
-                # Output should change smoothly
-                temporal_loss = (memory_output - prev_grad).pow(2).mean() * 0.1
+        if param_id in self._output_history and len(self._output_history[param_id]) > 0:
+            prev_output = self._output_history[param_id][-1]
+            if prev_output.shape == memory_output.shape:
+                # Memory output should change smoothly over time
+                temporal_loss = (memory_output - prev_output).pow(2).mean() * 0.1
 
         # Combine losses
         total_loss = reconstruction_loss + 0.1 * magnitude_loss + temporal_loss
 
         return total_loss
 
-    def _update_grad_history(self, param_id: int, grad: torch.Tensor):
-        """Update gradient history for a parameter."""
-        if param_id not in self._grad_history:
-            self._grad_history[param_id] = []
+    def _compute_l2_regression_loss(
+        self,
+        memory_output: torch.Tensor,
+        grad: torch.Tensor,
+        bucket_size: int,
+    ) -> torch.Tensor:
+        """
+        Compute paper-exact L² regression internal loss (Equations 21-23).
 
-        self._grad_history[param_id].append(grad.detach().clone())
+        L^(2) = ||memory(k) - P @ k||^2
 
-        # Keep only last N gradients
-        if len(self._grad_history[param_id]) > self._history_size:
-            self._grad_history[param_id].pop(0)
+        where k is the gradient (key), memory(k) is the memory output (value),
+        and P is a learned projection matrix that provides the target.
+
+        The memory module learns to approximate and improve upon this linear
+        transformation, capturing non-linear gradient compression patterns.
+
+        The projection P is updated via delta rule to track the memory's output:
+            P += lr * (memory(k) - P @ k) @ k^T / ||k||^2
+
+        Args:
+            memory_output: Output from memory module (value)
+            grad: Current gradient (key)
+            bucket_size: Size bucket for projection matrix lookup
+
+        Returns:
+            L² regression loss
+        """
+        device = grad.device
+        dtype = grad.dtype
+        output_dim = memory_output.shape[0]
+        input_dim = min(grad.shape[0], output_dim)  # Handle dimension mismatch
+
+        # Initialize projection matrix if needed
+        if bucket_size not in self._l2_projections:
+            # Initialize P as scaled identity to start near identity transform
+            P = torch.eye(output_dim, input_dim, device=device, dtype=dtype) * 0.1
+            self._l2_projections[bucket_size] = P
+
+        P = self._l2_projections[bucket_size]
+
+        # Move P to correct device if needed
+        if P.device != device:
+            P = P.to(device)
+            self._l2_projections[bucket_size] = P
+
+        # Compute target: P @ k
+        grad_for_proj = grad[:input_dim]  # Truncate if needed
+        target = P @ grad_for_proj
+
+        # L² loss: ||memory(k) - P @ k||^2
+        loss = (memory_output - target).pow(2).mean()
+
+        # Update projection matrix via delta rule (with gradients disabled)
+        # This allows P to track what the memory is learning to output
+        with torch.no_grad():
+            grad_norm_sq = (grad_for_proj ** 2).sum()
+            if grad_norm_sq > 1e-8:
+                # Delta rule: P += lr * error @ k^T / ||k||^2
+                error = memory_output.detach() - target.detach()
+                outer = torch.outer(error, grad_for_proj)
+                P_update = self.l2_projection_lr * outer / grad_norm_sq
+                self._l2_projections[bucket_size] = P + P_update
+
+        return loss
+
+    def _update_output_history(self, param_id: int, memory_output: torch.Tensor):
+        """Update memory output history for temporal smoothness loss.
+
+        Note: We store memory outputs (not raw gradients) to encourage
+        the learned transformation to evolve smoothly over time.
+        """
+        if param_id not in self._output_history:
+            self._output_history[param_id] = []
+
+        self._output_history[param_id].append(memory_output.detach().clone())
+
+        # Keep only last N outputs
+        if len(self._output_history[param_id]) > self._history_size:
+            self._output_history[param_id].pop(0)
 
     def step(self, closure: Optional[Callable] = None):
         """
@@ -616,11 +733,18 @@ class DeepMomentumGD(Optimizer):
                         ).squeeze(0)
 
                 # Compute internal loss
+                # Get bucket size for L2 projection lookup
+                if self.use_shared_memory:
+                    bucket_size = self.shared_memory.get_bucket(param_numel)
+                else:
+                    bucket_size = min(param_numel, 4096)
+
                 internal_loss = self._compute_internal_loss(
                     memory_output_for_loss,
                     grad_flat[:memory_output_for_loss.shape[0]],
                     momentum_flat[:memory_output_for_loss.shape[0]],
                     param_id,
+                    bucket_size,
                 )
                 internal_losses.append(internal_loss)
 
@@ -673,8 +797,8 @@ class DeepMomentumGD(Optimizer):
             momentum_buffer = state['momentum_buffer']
             grad_flat = grad.flatten()
 
-            # Update gradient history
-            self._update_grad_history(param_id, memory_output.detach())
+            # Update output history for temporal smoothness
+            self._update_output_history(param_id, memory_output.detach())
 
             # Reshape and apply to momentum
             if memory_output.shape[0] < param_numel:
@@ -702,10 +826,14 @@ class DeepMomentumGD(Optimizer):
 
     def get_internal_loss_stats(self) -> Dict[str, float]:
         """Get statistics about internal loss for monitoring."""
-        return {
+        stats = {
             'step_count': self.step_count,
-            'num_params_tracked': len(self._grad_history),
+            'num_params_tracked': len(self._output_history),
+            'internal_loss_mode': self.internal_loss_mode,
         }
+        if self.internal_loss_mode == 'l2_regression':
+            stats['num_l2_projections'] = len(self._l2_projections)
+        return stats
 
 
 class SimpleMomentumGD(Optimizer):

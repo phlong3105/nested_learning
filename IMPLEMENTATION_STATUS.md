@@ -17,6 +17,106 @@ Version 0.3.1 adds mathematical correctness fixes and verification tests:
 - **Mathematical verification tests** using finite differences and analytical solutions
 - **L2 regression attention** variant for HOPE (Equations 27-29)
 
+### Paper-Exact vs Practical Surrogate
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| **Delta rule updates** | ✅ Paper-exact | Matches Eq 28-29 exactly |
+| **L2RegressionAttention** | ✅ Paper-exact | Implements Eq 27-29: M += η(v - Mk)kᵀ |
+| **LinearAttention** | ✅ Paper-exact | Per-sequence memory accumulation |
+| **CMS update scheduling** | ✅ Paper-exact | Multi-frequency gradient application |
+| **SelfModifyingLinear** | ✅ Paper-exact | With `normalized=False` |
+| **DMGD internal loss** | ✅ Paper-exact | With `internal_loss_mode='l2_regression'` (Eq 21-23) |
+
+By default, DMGD uses a *practical surrogate* internal loss (cosine + magnitude + smoothness). For paper reproduction, use `internal_loss_mode='l2_regression'` which implements the literal L² regression formulation from Equations 21-23.
+
+---
+
+## Paper-Exactness Configuration Guide
+
+To reproduce paper experiments as closely as possible, use these settings:
+
+### Quick Reference
+
+```python
+# Paper-exact HOPE model
+model = HOPE(
+    dim=512,
+    n_layers=12,
+    n_heads=8,
+    use_self_modification=True,  # Enable delta-rule updates
+    self_mod_lr=0.001,           # Paper uses small learning rate
+)
+
+# Paper-exact DMGD optimizer (Eq 21-23)
+optimizer = DeepMomentumGD(
+    model.parameters(),
+    lr=1e-3,
+    memory_lr=1e-4,
+    internal_loss_mode='l2_regression',  # Paper-exact L² on K-V
+)
+
+# Paper-exact self-modifying layer (Eq 28-29)
+layer = SelfModifyingLinear(
+    in_features=512,
+    out_features=512,
+    normalized=False,  # Paper-exact: W -= lr * (W @ x @ x^T)
+)
+
+# Paper-exact CMS (Eq 30)
+cms = ContinuumMemorySystem(
+    dim=512,
+    num_levels=3,
+    chunk_sizes=[1, 10, 100],  # Paper-style frequency hierarchy
+)
+output = cms(x, use_residual=False)  # Paper-exact: nested MLP composition
+
+# Paper-exact L2 regression attention (Eq 27-29)
+attn = L2RegressionAttention(dim=512, num_heads=8, normalized=False)
+```
+
+### Detailed Settings
+
+| Component | Parameter | Paper-Exact | Stable Default | Notes |
+|-----------|-----------|-------------|----------------|-------|
+| **SelfModifyingLinear** | `normalized` | `False` | `True` | Paper: `W -= lr*(W@x@x^T)`, Stable: normalizes by `x^T@x` |
+| **CMS.forward()** | `use_residual` | `False` | `True` | Paper: `MLP_k(MLP_{k-1}(...))`, Stable: `x + Σ MLP_i(x)` |
+| **L2RegressionAttention** | `normalized` | `False` | `True` | Matches SelfModifyingLinear behavior |
+| **DMGD** | `internal_loss_mode` | `'l2_regression'` | `'surrogate'` | L² on K-V matrices vs cosine+magnitude |
+
+### What Each Setting Does
+
+**`normalized=False` (SelfModifyingLinear, L2RegressionAttention)**
+- Paper Equation 28-29: `W_{t+1} = W_t (I - x_t x_t^T)`
+- The update magnitude depends on `||x||^2`
+- Can be unstable with large activations
+
+**`normalized=True` (default)**
+- `W -= lr * (W @ x @ x^T) / (x^T @ x)`
+- Update magnitude is bounded regardless of activation scale
+- More stable for training, but deviates from strict paper formulation
+
+**`use_residual=False` (CMS)**
+- Paper Equation 30: true nested composition `y = MLP_k(MLP_{k-1}(...MLP_1(x)))`
+- Information flows through the full stack sequentially
+
+**`use_residual=True` (default)**
+- Transformer-style residual: `y = x + Σ w_i * MLP_i(x)`
+- Better gradient flow, but not the pure nested structure
+
+**`internal_loss_mode='l2_regression'` (DMGD)**
+- Paper Equations 21-23: L² regression on key-value mappings
+- `L^(2) = ||memory(k) - P @ k||^2` where k is the gradient
+- P is a learned projection matrix updated via delta rule
+- Memory learns to approximate and improve upon linear transformation
+
+**`internal_loss_mode='surrogate'` (default)**
+- Practical loss: cosine similarity + magnitude preservation + temporal smoothness
+- Conceptually aligned with paper but not mathematically identical
+- More stable in practice
+
+---
+
 ### What Works
 
 - ✅ **DeepMomentumGD with TRUE nested optimization** - Memory modules trained via internal loss
@@ -50,10 +150,11 @@ Version 0.3.1 adds mathematical correctness fixes and verification tests:
 - ✅ **MemoryMLP** - Takes [gradient, momentum] context and outputs transformed gradient
 - ✅ **FactorizedMemoryMLP** - Low-rank factorized memory for large tensors (v0.3.0)
 - ✅ **Gradient checkpointing** - Memory-efficient training (v0.3.0)
-- ✅ **Internal loss L^(2)** with three components:
+- ⚠️ **Internal loss L^(2)** - Practical surrogate with three components:
   - Reconstruction loss (cosine similarity with original gradient)
   - Magnitude preservation (output magnitude proportional to input)
   - Temporal smoothness (smooth changes over time)
+  - **Note**: This is conceptually aligned with the paper but not the literal L² regression on K-V matrices (Eq 21-23). For paper-exact L², see `L2RegressionAttention`.
 - ✅ **True nested optimization** - Memory modules trained every step via internal loss
 - ✅ Gradient history tracking for temporal loss computation
 
@@ -158,6 +259,14 @@ output = attn(x)  # Uses L2 regression for memory updates
 - ✅ Transformer architecture with self-modifying attention + CMS
 - ✅ Optional L2 regression attention mode (v0.3.1)
 - ✅ Multiple configurations: 340M, 760M, 1.3B parameters
+- ✅ **`adaptation_scope()` context manager** (v0.3.2) - Safe online adaptation with automatic weight restore
+
+```python
+# Safe inference-time adaptation that doesn't permanently modify weights
+with model.adaptation_scope():
+    output = model.generate(prompt, max_new_tokens=100)
+# Weights automatically restored to pre-scope values
+```
 
 ---
 
@@ -314,7 +423,7 @@ Verifies implementations match paper equations:
 
 | Component | API | Runs | Paper-Faithful | Notes |
 |-----------|-----|------|----------------|-------|
-| **DeepMomentumGD** | ✅ | ✅ | ✅ | True nested optimization |
+| **DeepMomentumGD** | ✅ | ✅ | ⚠️ | Internal loss is practical surrogate |
 | **NestedDeepMomentumGD** | ✅ | ✅ | ✅ | Meta-learning validated |
 | **SelfModifyingLinear** | ✅ | ✅ | ✅ | `normalized=False` for paper-exact |
 | **SelfModifyingAttention** | ✅ | ✅ | ✅ | Works during training & inference |
@@ -347,13 +456,13 @@ Verifies implementations match paper equations:
 
 ## 9. Conclusion
 
-Version 0.3.1 is a **mathematically verified implementation** of the Nested Learning paper:
+Version 0.3.1 provides **paper-exact implementations for core building blocks** with a practical DMGD optimizer:
 
-- ✅ Paper-exact modes available for all key components
-- ✅ Mathematical correctness verified via finite differences
+- ✅ Paper-exact: Delta rule, L2RegressionAttention, LinearAttention, CMS scheduling
+- ⚠️ Practical surrogate: DMGD internal loss (conceptually aligned, not literal L² on K-V)
+- ✅ Mathematical correctness verified via finite differences (for paper-exact components)
 - ✅ Per-sequence memory properly implemented
 - ✅ Inference-time adaptation working
-- ✅ L2 regression attention variant implemented
 - ✅ Comprehensive test coverage (27+ tests)
 
 This implementation is suitable for:
